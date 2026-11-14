@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>VeilLink</title>
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/favicon.png">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="boot-view" class="center-shell">
+    <div class="brand-lockup">
+      <img class="brand-mark" src="/favicon.png" alt="" width="38" height="38">
+      <span class="brand-name">VeilLink</span>
+    </div>
+    <p class="muted" id="boot-text">正在验证本机管理会话…</p>
+  </div>
+
+  <div id="login-view" class="center-shell" hidden>
+    <main class="login-card">
+      <div class="brand-lockup">
+        <img class="brand-mark" src="/favicon.png" alt="" width="38" height="38">
+        <div>
+          <h1>VeilLink</h1>
+          <p class="muted">本机管理端</p>
+        </div>
+      </div>
+      <form id="login-form" method="post" novalidate>
+        <label for="admin-token">管理令牌</label>
+        <input id="admin-token" type="password" autocomplete="current-password" spellcheck="false" autofocus required>
+        <button id="login-button" class="primary full" type="submit">进入管理端</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+      <p class="hint">令牌保存在数据目录的 <code>ADMIN_TOKEN.txt</code>，只在本机可见。</p>
+    </main>
+  </div>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand-lockup compact">
+        <img class="brand-mark" src="/favicon.png" alt="" width="38" height="38">
+        <div>
+          <span class="brand-name">VeilLink</span>
+          <span class="brand-caption">本地网关 · 公网安全分发</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="service-state" id="service-state">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-label">检查中</span>
+        </span>
+        <button id="logout-button" class="ghost small" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="summary" aria-label="服务概览">
+        <div class="summary-item">
+          <span class="summary-label">公网 API</span>
+          <code id="public-url" class="summary-value">未填写</code>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">本地网关</span>
+          <code id="upstream-summary" class="summary-value">未配置</code>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">有效密钥</span>
+          <strong id="key-summary" class="summary-value">0 / 0</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-label">本次运行请求</span>
+          <strong id="request-summary" class="summary-value">0</strong>
+        </div>
+      </section>
+
+      <div class="grid">
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>网关配置</h2>
+              <p class="card-sub">上游地址、协议与模型映射</p>
+            </div>
+            <span class="tag" id="upstream-state">未配置</span>
+          </div>
+          <form id="config-form" class="stack" novalidate>
+            <label for="base-url">基础地址</label>
+            <input id="base-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:11434">
+            <p class="field-hint">只填到 <code>/v1</code> 为止，不要包含 <code>/v1/messages</code> 或 <code>/v1/chat/completions</code>。</p>
+
+            <div class="field-row">
+              <div>
+                <label for="protocol">上游协议</label>
+                <select id="protocol">
+                  <option value="anthropic">Anthropic Messages</option>
+                  <option value="openai">OpenAI Chat</option>
+                </select>
+              </div>
+              <div>
+                <label for="auth-mode">上游鉴权</label>
+                <select id="auth-mode">
+                  <option value="auto">自动</option>
+                  <option value="x-api-key">x-api-key</option>
+                  <option value="bearer">Bearer</option>
+                  <option value="none">无鉴权</option>
+                </select>
+              </div>
+            </div>
+
+            <label for="upstream-model">上游模型</label>
+            <input id="upstream-model" type="text" spellcheck="false" placeholder="例如 your-model-id">
+            <p class="field-hint">填写后，客户端传入的模型名会被统一映射到该模型。OpenAI 协议必填。</p>
+
+            <label for="upstream-key">上游 API Key</label>
+            <div class="input-action">
+              <input id="upstream-key" type="password" autocomplete="off" spellcheck="false" placeholder="未设置（可选）">
+              <button id="toggle-upstream-key" class="ghost small" type="button">显示</button>
+            </div>
+            <label class="check-line" for="clear-upstream-key">
+              <input id="clear-upstream-key" type="checkbox">
+              <span>清除已保存的上游密钥</span>
+            </label>
+
+            <label for="public-base-url">公网 API 地址</label>
+            <input id="public-base-url" type="url" spellcheck="false" placeholder="https://api.example.com">
+            <p class="field-hint">仅用于本页展示与客户端配置，必须是 HTTPS。隧道实际域名仍需在 Cloudflare 配置。</p>
+
+            <div class="form-actions">
+              <button id="save-config" class="primary" type="submit">保存配置</button>
+              <button id="test-upstream" class="secondary" type="button">测试网关</button>
+              <span id="test-result" class="inline-result" role="status"></span>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>API 密钥</h2>
+              <p class="card-sub">独立密钥，随时吊销</p>
+            </div>
+            <span class="tag" id="device-machine">设备头可选</span>
+          </div>
+          <form id="key-form" class="key-form" novalidate>
+            <input id="key-name" type="text" maxlength="80" autocomplete="off" placeholder="名称 / 用途">
+            <input id="key-device" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="可选设备标识">
+            <button id="generate-key" class="primary" type="submit">生成密钥</button>
+          </form>
+          <p class="hint" id="device-hint">设备标识通过 <code>X-VeilLink-Device</code> 请求头校验。它是增强项，不是强身份认证；ZCode 图形界面目前不能设置自定义请求头。</p>
+          <div class="table-wrap">
+            <table class="keys-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>状态</th>
+                  <th>创建</th>
+                  <th>最近使用</th>
+                  <th class="align-right">操作</th>
+                </tr>
+              </thead>
+              <tbody id="keys-body">
+                <tr><td colspan="5" class="empty">暂无密钥</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <section class="card logs-card">
+        <div class="card-head">
+          <div>
+            <h2>最近请求</h2>
+            <p class="card-sub">仅记录元数据，不记录提示词、请求体或完整密钥</p>
+          </div>
+          <div class="form-actions">
+            <button id="refresh-button" class="ghost small" type="button">刷新</button>
+            <button id="clear-logs" class="ghost small danger-text" type="button">清空</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="logs-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>密钥 / 来源</th>
+                <th>模型 / 路径</th>
+                <th>状态</th>
+                <th>耗时</th>
+                <th>Token</th>
+              </tr>
+            </thead>
+            <tbody id="logs-body">
+              <tr><td colspan="6" class="empty">暂无请求</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span id="footer-version">VeilLink</span>
+        <span>管理端只绑定 127.0.0.1；公网只应暴露鉴权 API。</span>
+      </footer>
+    </main>
+  </div>
+
+  <dialog id="key-dialog" class="key-dialog">
+    <form method="dialog" class="stack">
+      <div class="card-head">
+        <div>
+          <h2 id="key-dialog-title">API 密钥</h2>
+          <p class="card-sub" id="key-dialog-subtitle">完整密钥只在本机显示</p>
+        </div>
+        <button class="icon-button" value="close" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <p class="dialog-warning">请通过可信渠道发送。任何拿到此密钥且满足设备条件的人都能调用你的本地网关。</p>
+      <div class="input-action">
+        <input id="key-output" type="text" readonly spellcheck="false" aria-label="完整 API 密钥">
+        <button id="copy-key" class="primary small" type="button">复制</button>
+      </div>
+      <div class="form-actions end">
+        <button class="secondary" value="close">完成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

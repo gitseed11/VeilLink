@@ -1,0 +1,20 @@
+{
+  "name": "veillink",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Anthropic-compatible gateway with local-only administration and secure public API access.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test --test-concurrency=1 test/unit.test.js test/integration.test.js",
+    "test:unit": "node --test test/unit.test.js",
+    "test:integration": "node --test test/integration.test.js",
+    "admin:reset": "node scripts/admin-reset.js",
+    "upstream:reset": "node scripts/upstream-reset.js"
+  }
+}

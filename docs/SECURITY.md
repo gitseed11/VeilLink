@@ -1,0 +1,147 @@
+# VeilLink 安全模型与运维边界
+
+## 威胁模型
+
+VeilLink 保护的是：本地网关能力不被未授权公网使用者调用；管理面不进入公网；完整 API Key 不出现在公网响应或日志中。它不试图抵御已经获得当前 Windows 用户权限的攻击者，也不替代 Cloudflare 边缘的 DDoS 防护。
+
+### 信任边界
+
+1. **公网客户端**：只可信其持有一个有效 API Key。所有请求头、模型名、内容块和路径都不可信。
+2. **Cloudflare 边缘/隧道**：终止公网 TLS，并将请求转发到默认的 `127.0.0.1:8788`（由 `VEILLINK_PUBLIC_PORT` 决定）。Cloudflare 账号本身属于你信任的基础设施。
+3. **本机管理端**：只有本机浏览器/进程可访问默认的 `127.0.0.1:8787`（由 `VEILLINK_ADMIN_PORT` 决定），且需要管理令牌。
+4. **本地上游网关**：由你配置，属于可信服务；上游返回的错误信息会被归一化和脱敏后再到公网。
+5. **本机文件系统**：安装目录与 `data/` 含可执行代码和密钥材料。通过 Windows ACL 限制到当前用户、SYSTEM、Administrators。
+
+## 资产
+
+- 客户端 API Key（生成后可通过管理端再次查看）。
+- 上游 API Key。
+- 管理令牌。
+- Cloudflare Tunnel 凭据与证书。
+- 请求元数据（模型、状态、IP、Token 数等）。
+
+## 访问控制
+
+### 公网 API
+
+- 独立 HTTP 监听器，默认只绑定 `127.0.0.1:8788`（由 `VEILLINK_PUBLIC_PORT` 决定）；Cloudflare 隧道只指向该端口。
+- 只路由三个接口：`POST /v1/messages`、`POST /v1/messages/count_tokens`、`GET /v1/models`。
+- 不接受 API Key 查询参数或 Cookie。
+- 同时接受 `x-api-key` 与 `Authorization: Bearer`，二者不同时只取有效者。
+- 无效、格式错误、已吊销密钥统一返回通用 401，不区分具体原因。
+- 设备绑定密钥缺少或错配 `X-VeilLink-Device` 时返回 403；设备头为可选增强。
+- 认证失败按 IP 限流；每密钥独立请求速率和并发限制。
+- 认证通过后才读取请求体，且请求体有 100 MB 上限。
+- 上游超时、客户端断开、流式中断都会传播/取消，避免悬挂连接。
+
+### 管理端
+
+- 默认只绑定 `127.0.0.1:8787`（由 `VEILLINK_ADMIN_PORT` 决定），不进入 Cloudflare 隧道。
+- **Host 白名单**：仅接受 `127.0.0.1:<管理端口>`、`localhost:<管理端口>`、`[::1]:<管理端口>`，阻止 DNS rebinding 和误将隧道指向管理口。
+- 管理令牌只保存 scrypt 哈希；持久化明文仅在本机 `data/ADMIN_TOKEN.txt`（ACL 保护），首次启动和交互式 `admin:reset` 还会在终端临时打印。
+- 登录成功后签发随机 256 位会话 Cookie：`HttpOnly; SameSite=Strict; Path=/; Max-Age=28800`。
+- 登录响应同时签发每个会话独立的随机 CSRF 令牌；除 `/admin/api/login`（必须携带 `X-VeilLink-CSRF: 1`）外，所有 `/admin/api/*` 请求（包括读取状态和日志）都必须携带该会话的 `X-VeilLink-CSRF` 令牌。令牌只保存在服务端会话内存和当前标签页的 `sessionStorage`，不写入 Cookie。
+- 每个请求都校验 `Origin`/`Sec-Fetch-Site`；跨站表单无法设置自定义头。
+- 管理凭据文件变化（例如 `admin:reset`）会使现有管理会话立即失效。
+- 管理登录失败按 IP 限流；成功登录不计入失败预算。管理端只使用回环套接字地址，不信任 `X-Forwarded-For` / `CF-Connecting-IP`。
+- CSP `default-src 'none'`、`script-src 'self'`、无内联脚本、无外部 CDN；`X-Frame-Options: DENY`。
+- 页面动态数据均通过 `textContent` 写入，避免将密钥名称等用户输入作为 HTML。
+- 静态资源使用固定路径映射，不存在目录遍历。
+- 管理 API 的完整密钥只在本机响应中出现，带 `Cache-Control: no-store`。
+
+## 密钥
+
+### 格式与熵
+
+`sk-` + 24 个字符，字符集为：
+
+```text
+0 1 2 3 4 5 6 7 8 9 @ # % & a b c ... z A B C ... Z
+```
+
+共 66 个字符，使用 `crypto.randomInt` 无模偏采样。24 字符约 145 bit 熵。
+
+### 存储
+
+- 每个客户端密钥使用 AES-256-GCM 加密保存（随机 IV、认证标签）。
+- 认证查找使用 HMAC-SHA256 索引；命中后再解密并进行常量时间比较。
+- 主密钥在 `data/master.key`，与密文同目录；安装目录和 data 目录 ACL 收紧。能读取当前 Windows 用户全部文件的人可以解密，这超出本工具防护边界。
+- 上游 API Key 也使用同一机制加密，管理端只显示“已配置”，不返回明文。
+- 管理令牌使用 scrypt（N=16384, r=8, p=1）加盐存储。
+- 密钥落盘权限为尽力 0600；Windows 上真实边界由 ACL 提供。
+
+### 吊销
+
+吊销立即写入磁盘并从有效密钥集合中失效；无需重启服务。已吊销记录保留元数据以便审计，可通过管理端查看旧密钥文本，但不能再用于认证。
+
+### 设备头
+
+`X-VeilLink-Device` 由客户端自报，可被伪造，不具备强身份认证能力。它用于减少误用、区分设备、配合可读日志；不能替代独立密钥和及时吊销。ZCode 3.18.2 GUI 不支持自定义头，因此 ZCode 密钥应留空设备字段。
+
+## 日志与响应
+
+请求日志仅保存：
+
+- 时间、请求 ID、方法、路径、HTTP 状态、耗时。
+- 密钥 ID/名称（不含完整密钥）、模型、是否流式、Token 数（如上游提供）。
+- 客户端 IP（通过 Cloudflare 时为 `CF-Connecting-IP`）、上游状态、错误类型/脱敏摘要。
+
+不保存：
+
+- 请求体、提示词、响应内容、请求头原文。
+- 完整客户端密钥或上游密钥。
+- Cookie/管理令牌。
+
+所有日志字段经过脱敏函数处理；完整 `sk-` 形式字符串会被替换，敏感命名字段（`apiKey`、`authorization`、`token` 等）整体替换为 `[REDACTED]`。Token 用量字段不会因含 “token” 字样而被误删。请求日志不保存上游错误正文或提示词片段，只保存映射后的错误类型和上游状态码；`error`/`detail` 不会回填上游响应文本。
+
+公网错误响应使用 Anthropic 风格，不包含上游 URL、内部堆栈或密钥。上游 4xx 消息会脱敏后返回，上游 401/403 统一映射为 502，避免误导客户端认为自己的 VeilLink 密钥失效。
+
+所有出站响应都会脱敏配置的上游 API Key 和完整 `sk-` 形式密钥：原生 Anthropic 非流式/流式、OpenAI 非流式/流式翻译（含文本增量、thinking 增量、signature 增量、工具参数和错误文本）都经过同一脱敏路径。非流式响应会检测跨内容块/thinking/signature 拼接的密钥，并对解析后的对象（含属性名）做深度脱敏；流式文本增量使用跨文本块滚动缓冲，thinking 在单个 thinking 块内、工具参数在单个工具块内、signature 在单个 thinking 块内做跨事件聚合/脱敏，密钥被拆分到同一块内的多个同类增量时也不会完整发出。原生 Anthropic 流缺少 `message_stop`、超时、断连或收到 `error` 事件时，会转换为 Anthropic `error` 事件，不会把截断内容伪装成正常完成。OpenAI 上游若返回截断流、无效或被截断的工具参数或数组型工具输入，会结束为错误事件；`finish_reason=length` 时省略不完整工具调用并以 `max_tokens` 正常结束。
+
+## 文件与进程
+
+- 安装目录与 `data/` 的 ACL 助手会先接管所有权、移除继承、删除白名单外的 Allow ACE，并删除所有显式 Deny ACE（例如从备份恢复的 Everyone 权限），再只授予当前用户 SID、SYSTEM 和 Administrators；不会先把目录重置为父目录的宽权限。最终逐项验证 Allow/Deny ACE 和 Owner，任何白名单外的 ACE 或所有者都会导致启动失败。服务启动和 `scripts/start.ps1` 都会执行该检查；也可手动运行 `pwsh scripts/setup-acl.ps1`。
+- 云隧道启动前会校验 cloudflared 的固定 SHA-256；`tunnel-setup.ps1` 也会校验，防止被替换的二进制建立出站隧道。
+- 如果 ACL 收紧失败，Windows 上服务默认拒绝启动，避免密钥目录停留在继承权限下。仅在明确接受风险且使用无法设置 ACL 的文件系统时，才可在启动前设置 `VEILLINK_ALLOW_INSECURE_ACL=1` 跳过该保护；`start.ps1` 和 `npm start` 都会识别该开关。
+- Cloudflare 证书/隧道凭据放在 `data/tunnel/`，同样受 ACL 保护。
+- `scripts/start.ps1` 启动的后台进程日志在 `data/logs/`；首次管理令牌仅在交互式终端打印，后台模式从文件读取。
+- 桌面快捷方式、托盘进程和 `launcher.ps1` 都以当前 Windows 用户运行；托盘只负责启动/停止本机进程和打开管理页，不改变公网鉴权边界。停止操作要求确认。
+- 不要将 `data/`、`Temp/`、`bin/cloudflared.exe` 提交到公开仓库。
+
+## Cloudflare 相关
+
+- 命名隧道仅出站连接，不需要公网 IP 或端口映射。
+- 隧道配置只含一个 hostname ingress：`hostname → http://127.0.0.1:<公网源站端口>`；兜底 404。`start.ps1` 会做结构校验（单一 ingress/hostname、目标 service、404 兜底，拒绝 quoted 映射键、`path` 规则、flow 映射/anchors/aliases/merge keys、显式 `?` 键、反斜杠转义/escape sequences、`originRequest`/`httpHostHeader`/debug 日志），并运行 `cloudflared tunnel ingress validate` 与 `/`、`/admin`、`/admin/api/state`、`/v1/messages` 及随机路径的 `ingress rule` 断言；最终还要求配置与 `tunnel-setup.ps1` 生成的标准结构完全匹配，手工加入的额外 YAML 结构会被拒绝。隧道进程以 `--loglevel info --no-autoupdate` 启动。
+- 管理端端口（默认 `8787`，由 `VEILLINK_ADMIN_PORT` 决定）不应出现在任何隧道 ingress 中。
+- 隧道与 Node 服务通过 watchdog 绑定：启动时验证 watchdog 进程身份和存活；服务器退出/崩溃时 watchdog 按当前隧道配置停止 cloudflared；`stop.ps1` 先停隧道和服务器，清理失败会返回非零并提示，托盘在异常失去管理端口时也会主动调用 `stop.ps1 -Force`。
+- Cloudflare 账号应启用强密码/2FA；隧道证书和凭据等同机器身份。
+- 建议 Cloudflare SSL/TLS 使用 Full (strict) 或 Automatic；不要使用 Flexible。启用 Always Use HTTPS。
+- 免费计划最大请求体约 100 MB；这是视频等大文件的实际上限。
+
+## 已知限制
+
+- 单管理员模型；没有公网管理、用户注册、计费、配额。
+- 本机恶意进程或已登录用户可读取数据目录、调用管理 API，或篡改二进制。
+- 设备头不是强认证。
+- 标准 Anthropic Messages 协议无原生视频内容块；视频依赖上游/客户端扩展。
+- 服务进程不是 Windows 系统服务；需要持久运行时可使用计划任务或进程管理器。
+- 管理 Cookie 是主机级而不是端口级；已登录管理端时不要访问其他不可信的 `127.0.0.1` 端口服务。管理 API 还要求每个会话独立的 CSRF 令牌，可阻止仅窃取 Cookie 的其他本机服务直接重放读写请求，但本机恶意进程仍属于信任边界外。
+- 公网监听器仅在 TCP 对端为回环地址（Cloudflare 隧道或本机代理）时信任 `CF-Connecting-IP` / `X-Forwarded-For` 用于限流和日志；非回环直连使用真实套接字地址。不要把公网源站端口直接映射到公网；若通过本地端口转发暴露，转发器必须剥离客户端提供的这些头。
+- 管理登录失败按真实回环地址限流；本机进程可以故意失败登录造成短时锁定（可用性影响，不是认证绕过）。
+- 100 MB 请求体在进程内缓冲并 JSON 解析；已授权客户端仍可能造成内存/事件循环压力。需要处理超大视频时请评估上游和机器内存。
+- 上游响应有读写空闲超时，但没有独立的“总时长”硬截止；极慢的上游可以占用一个并发槽直到空闲超时。
+- 如果 `master.key` 丢失且未配置上游密钥，服务可能生成新主密钥，导致已保存的客户端密钥无法认证；启动日志和管理页会提示无法解密的密钥数量，请恢复备份的 `master.key` 或重新生成客户端密钥。若已配置上游密钥，启动会失败；先停止服务，运行 `npm run upstream:reset` 清除无法解密的上游密钥，再重新输入。
+- `config.json` / `keys.json` / `admin.json` 的元数据没有额外的 HMAC 签名；能写入数据目录的本机进程属于信任边界外。
+- 极端情况下，上游若被攻陷并故意把密钥拆分到多个不同类型的字段（例如 thinking 与 text、文本与工具参数、或 thinking 与 signature 之间）、跨多个 thinking 块，或跨多个工具调用块，重组仍属于上游信任边界内的残余风险；文本块/文本增量已做跨块脱敏，thinking、工具参数和 signature 仅在同一内容块内做跨事件脱敏。
+- `cloudflared` 与 Node 服务默认以同一 Windows 用户运行；需要更强隔离时，应使用单独的低权限服务账户并同步调整 ACL/隧道凭据权限。
+- Cloudflare 边缘终止公网 TLS，理论上可见客户端 API Key 和提示词；这是使用 Cloudflare Tunnel 的信任边界。
+- Cloudflare 无 SLA、边缘网络质量、上游可用性不由本项目保证。
+
+## 事件处置
+
+1. 立即在管理端吊销泄露的 API Key。
+2. 若上游密钥可能泄露：更换上游密钥并在“网关配置”中更新。
+3. 若管理令牌可能泄露：先停止服务，再运行 `npm run admin:reset`（脚本会拒绝在服务仍监听时执行）。
+4. 若隧道凭据泄露：在 Cloudflare 删除/轮换隧道并重新安装 cloudflared。
+5. 检查 `data/logs/access.log` 的请求元数据；必要时清空。
+6. 停止服务：右键托盘图标 → **停止 VeilLink…** 并确认，或运行 `pwsh "C:\VeilLink\scripts\stop.ps1"`（会弹出确认框；自动化加 `-Force`）。
