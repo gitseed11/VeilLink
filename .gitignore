@@ -1,0 +1,36 @@
+# Runtime data, secrets, logs, and tunnel credentials
+/data/
+
+# Temporary tools, captures, and test data
+/Temp/
+
+# Downloaded binary (see bin/README.md for source and checksum)
+/bin/cloudflared.exe
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local logs, PID files, and environment overrides (repo root only)
+/*.log*
+/*.pid
+/.env
+/.env.*
+
+# Keep the placeholder env template tracked when it is added
+!/.env.example
+
+# Local editor/OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Release assets prepared locally; zipped and uploaded separately
+/_release-assets/
+
+# Credentials and certificates outside data/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
